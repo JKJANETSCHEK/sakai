@@ -15,6 +15,8 @@
  */
 package org.sakaiproject.assignment.entityproviders;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.time.Instant;
 import java.time.temporal.ChronoField;
 import java.util.*;
@@ -35,6 +37,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.commons.fileupload.FileItem;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.sakaiproject.assignment.api.AssignmentConstants;
 import org.sakaiproject.assignment.api.AssignmentReferenceReckoner;
 import org.sakaiproject.assignment.api.AssignmentService;
 import org.sakaiproject.assignment.api.MultiGroupRecord;
@@ -100,6 +105,8 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
     private GradebookExternalAssessmentService gradebookExternalService;
     private ServerConfigurationService serverConfigurationService;
     private UserDirectoryService userDirectoryService;
+    private ContentHostingService dbContentService;
+
 
     // HTML is deliberately not handled here, so that it will be handled by RedirectingAssignmentEntityServlet
     public String[] getHandledOutputFormats() {
@@ -162,6 +169,335 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
         return assignment;
     }
 
+
+
+    /*
+     *  JJ custom stuff
+     */
+
+
+    @EntityCustomAction(action = "createAssignment",viewKey = "")
+    public String createAssignment(EntityReference ref, Map<String, Object> params){
+        String context = (String) params.get("context");
+        String title = (String) params.get("title");
+        String instructions = (String) params.get("instructions");
+        Boolean honorPledge = Boolean.parseBoolean((String)params.get("honorPledge"));
+
+        String group = (String) params.get("group");
+        Boolean isGroup = Boolean.parseBoolean((String)params.get("isGroup"));
+
+        Long dueDate = Long.parseLong((String) params.get("dueDate"));
+        Long openDate = Long.parseLong((String) params.get("openDate"));
+        Long closeDate = Long.parseLong((String) params.get("closeDate"));
+        Long visibleDate = Long.parseLong((String) params.get("visibleDate"));
+
+
+        Instant dt = Instant.ofEpochMilli(dueDate);
+        Instant ot = Instant.ofEpochMilli(openDate);
+        Instant ct = Instant.ofEpochMilli(closeDate);
+        Instant vt = Instant.ofEpochMilli(visibleDate);
+
+        //Submission Type
+        String typeOfSubmissionString = (String) params.get("typeOfSubmission");
+        Assignment.SubmissionType typeOfSubmission =  null;
+        if(typeOfSubmissionString.contains("1")){
+            typeOfSubmission = Assignment.SubmissionType.TEXT_AND_ATTACHMENT_ASSIGNMENT_SUBMISSION;
+        }else if(typeOfSubmissionString.contains("2")){
+            typeOfSubmission = Assignment.SubmissionType.ATTACHMENT_ONLY_ASSIGNMENT_SUBMISSION;
+        }else if(typeOfSubmissionString.contains("3")){
+            typeOfSubmission = Assignment.SubmissionType.TEXT_AND_ATTACHMENT_ASSIGNMENT_SUBMISSION;
+        }else if(typeOfSubmissionString.contains("4")){
+            typeOfSubmission = Assignment.SubmissionType.NON_ELECTRONIC_ASSIGNMENT_SUBMISSION;
+        }else if(typeOfSubmissionString.contains("5")){
+            typeOfSubmission = Assignment.SubmissionType.SINGLE_ATTACHMENT_SUBMISSION;
+        }
+
+        //Resubmission
+        String selectedNumberResubs = (String) params.get("selectedNumberResubs");
+        String resubmissionDate = (String) params.get("resubmissionDate");
+
+        //Attachment
+        String fileName = (String) params.get("fileName");
+        String fileType = (String) params.get("fileType");
+        String attachmentData = (String) params.get("attachmentData");
+
+        //Model Answer
+        String addModelAnswerString = (String) params.get("addModelAnswer");
+        Boolean addModelAnswer = Boolean.parseBoolean(addModelAnswerString);
+
+        String fileNameModelAnswer = null;
+        String fileTypeModelAnswer = null;
+        String modelAnswerData = null;
+        String modelAnswerText = null;
+        String showTo = null;
+        if(addModelAnswer){
+            fileNameModelAnswer = (String) params.get("fileNameModelAnswer");
+            fileTypeModelAnswer = (String) params.get("fileTypeModelAnswer");
+            modelAnswerData = (String) params.get("modelAnswerData");
+            modelAnswerText = (String) params.get("modelAnswerText");
+            showTo = (String) params.get("showTo");
+        }
+
+        //  Boolean isGroup = true;
+        Set<String> groups = new HashSet<>();
+        Set<String> attachments = new HashSet<>();
+
+        try{
+            Assignment assign = assignmentService.addAssignment(context);
+            String aId = assign.getId();
+
+            //Attachment
+            if(attachmentData != null){
+                byte[] data = Base64.getDecoder().decode(attachmentData);
+                ResourcePropertiesEdit rpe = contentHostingService.newResourceProperties();
+                rpe.addProperty(rpe.PROP_DISPLAY_NAME, fileName);
+                ContentResource file = contentHostingService.addAttachmentResource(fileName, fileType, data,rpe);
+                Reference refAttachement = entityManager.newReference(file.getReference());
+                attachments.add(refAttachement.getReference());
+
+                assign.setAttachments(attachments);
+            }
+
+
+
+            //Model Answer
+            if(addModelAnswer){
+                saveModelAnswer(context,aId, modelAnswerData,  fileNameModelAnswer,  fileTypeModelAnswer,  modelAnswerText,  showTo);
+            }
+
+
+            if(!group.equals("null")){
+                groups.add("/site/"+context+"/group/" + group);
+                assign.setGroups(groups);
+                assign.setIsGroup(isGroup);
+                assign.setTypeOfAccess(Assignment.Access.GROUP);
+            }else {
+                assign.setTypeOfAccess(Assignment.Access.SITE);
+            }
+
+            assign.setAuthor(sessionManager.getCurrentSessionUserId());
+            assign.setPosition(0);
+            assign.setTitle(title);
+            assign.setDueDate(dt);
+            assign.setOpenDate(ot);
+            assign.setCloseDate(ct);
+            assign.setInstructions(instructions);
+            assign.setDropDeadDate(dt);
+            assign.setVisibleDate(vt);
+            assign.setHonorPledge(honorPledge);
+
+            assign.setTypeOfSubmission(typeOfSubmission);
+
+            //properties
+            Map<String, String> properties = new HashMap<>();
+            if(resubmissionDate != null){
+                properties.put(AssignmentConstants.ALLOW_RESUBMIT_CLOSETIME,resubmissionDate);
+                properties.put(AssignmentConstants.ALLOW_RESUBMIT_NUMBER, selectedNumberResubs);
+            }
+            assign.setProperties(properties);
+            assign.setTypeOfGrade(Assignment.GradeType.UNGRADED_GRADE_TYPE);
+
+            assignmentService.updateAssignment(assign);
+            return assign.getId();
+
+        }catch(Exception e){
+            return e.getClass().getName() + " : " + e.getMessage();
+        }
+    }
+
+
+
+    @EntityCustomAction(action = "editAssignment",viewKey = "")
+    public String editAssignment(EntityReference ref, Map<String, Object> params){
+
+        Long dueDate = Long.parseLong((String) params.get("dueDate"));
+        Long openDate = Long.parseLong((String) params.get("openDate"));
+        Long closeDate = Long.parseLong((String) params.get("closeDate"));
+        Long visibleDate = Long.parseLong((String) params.get("visibleDate"));
+        String selectedAssignment = (String) params.get("selectedAssignment");
+        String context = (String) params.get("context");
+
+        Instant dt = Instant.ofEpochMilli(dueDate);
+        Instant ot = Instant.ofEpochMilli(openDate);
+        Instant ct = Instant.ofEpochMilli(closeDate);
+        Instant vt = Instant.ofEpochMilli(visibleDate);
+
+
+
+        Site site;
+        try {
+            site = siteService.getSiteVisit(context);
+        } catch (IdUnusedException e) {
+            throw new EntityNotFoundException("Invalid siteId: " + context, context);
+        } catch (PermissionException e) {
+            throw new EntityNotFoundException("No access to site: " + context, context);
+        }
+
+        // List<Assignment> assignments = new ArrayList();
+
+        String response = null;
+        Collection<Assignment> assignments= assignmentService.getAssignmentsForContext(context);
+        Iterator it = assignments.iterator();
+        while(it.hasNext()){
+            Assignment as = (Assignment) it.next();
+            if(as.getTitle().equals(selectedAssignment)){
+                try{
+                    as.setDueDate(dt);
+                    as.setOpenDate(ot);
+                    as.setCloseDate(ct);
+                    as.setVisibleDate(vt);
+                    assignmentService.updateAssignment(as);
+                    response += "\n" + as.getId() + " updated";
+                }catch (Exception e){
+                    return e.getClass().getName() + " : " + e.getMessage();
+                }
+
+            }
+        }
+
+
+        return response;
+
+    }
+
+
+    @EntityCustomAction(action = "getSubmissions",viewKey = "")
+    public List getSubmissions(EntityReference ref, Map<String, Object> params){
+        List<String> results = new ArrayList();
+        String assignmentId = (String) params.get("assignmentId");
+        String retVal = null;
+        try {
+            Assignment assign = assignmentService.getAssignment(assignmentId);
+            Set<AssignmentSubmission> subs = assignmentService.getSubmissions(assign);
+
+            for (AssignmentSubmission thisSub : subs) {
+                JSONObject submission = new JSONObject();
+                submission.put("feedbackComment", thisSub.getFeedbackComment());
+                submission.put("feedbackText", thisSub.getFeedbackText());
+                submission.put("grade",thisSub.getGrade());
+                submission.put("status",assignmentService.getSubmissionStatus(thisSub.getId()));
+                submission.put("submittedText", thisSub.getSubmittedText());
+                submission.put("groupId", thisSub.getGroupId());
+
+                JSONArray submitters = new JSONArray();
+                for (AssignmentSubmissionSubmitter submitter : thisSub.getSubmitters()) {
+                    JSONObject submitterId = new JSONObject();
+                    submitterId.put("submitterId", submitter.getSubmitter());
+                    submitters.put(submitterId);
+                }
+                submission.put("submitters",submitters);
+
+                JSONArray attachements = new JSONArray();
+                for (String attachment : thisSub.getAttachments()) {
+                    Reference reference = entityManager.newReference(attachment);
+                    Entity ent = reference.getEntity();
+                    JSONObject attachement = new JSONObject();
+                    attachement.put("attachmentURL", ent.getUrl());
+                    attachements.put(attachement);
+                }
+                submission.put("attachements",attachements);
+                results.add(submission.toString());
+            }
+        }catch(Exception e){
+
+        }
+        return results;
+    }
+
+    @EntityCustomAction(action = "uploadModelAnswerRetrospect",viewKey = "")
+    public String uploadModelAnswerRetrospect(EntityReference ref, Map<String, Object> params){
+        List<String> results = new ArrayList();
+
+        String context = (String) params.get("context");
+        String assignmentTitle = (String) params.get("assignmentTitle");
+        String fileNameModelAnswer = (String) params.get("fileNameModelAnswer");
+        String fileTypeModelAnswer = (String) params.get("fileTypeModelAnswer");
+        String modelAnswerData = (String) params.get("modelAnswerData");
+        String groupId = (String) params.get("groupId");
+        String modelAnswerText = (String) params.get("modelAnswerText");
+
+        Collection<Assignment> collection = assignmentService.getAssignmentsForContext(context);
+        Iterator it = collection.iterator();
+        while (it.hasNext()){
+            Assignment assignment = (Assignment) it.next();
+            if(assignment.getTitle().contains(assignmentTitle)){
+                Set<String> groups = assignment.getGroups();
+                Iterator it2 = groups.iterator();
+                while (it2.hasNext()){
+                    String group = (String) it2.next();
+                    if(group.contains(groupId)){
+                        String aId = assignment.getId();
+                        saveModelAnswer(context,aId, modelAnswerData, fileNameModelAnswer,  fileTypeModelAnswer,  modelAnswerText,  "4");
+                    }
+                }
+            }
+        }
+        return "success";
+    }
+
+
+    @EntityCustomAction(action = "getAssignmentTitles",viewKey = "")
+    public List<String> getAssignmentTitles(EntityReference ref, Map<String, Object> params){
+        List<String> listAssignmentsTitles = new ArrayList<>();
+
+        String context = (String) params.get("context");
+        Collection<Assignment> assingmentCollection = assignmentService.getAssignmentsForContext(context);
+
+        Iterator it = assingmentCollection.iterator();
+        while (it.hasNext()){
+            Assignment ass = (Assignment) it.next();
+            String title = ass.getTitle();
+            if(!listAssignmentsTitles.contains(title)) {
+                listAssignmentsTitles.add(title);
+            }
+        }
+        return listAssignmentsTitles;
+    }
+
+    private void saveModelAnswer(String context,String aId,String modelAnswerData, String fileNameModelAnswer, String fileTypeModelAnswer, String modelAnswerText, String showTo){
+        try{
+            //Model Answer
+            byte[] dataModelAnswer = Base64.getDecoder().decode(modelAnswerData);
+            ResourcePropertiesEdit rpeModelAnswer = contentHostingService.newResourceProperties();
+            rpeModelAnswer.addProperty(rpeModelAnswer.PROP_DISPLAY_NAME, fileNameModelAnswer);
+            // ContentResource file = contentHostingService.addAttachmentResource(fileName, fileType, data,rpe);
+            InputStream inputStream = new ByteArrayInputStream(dataModelAnswer);
+            ContentResource fileModelAnswer = dbContentService.addAttachmentResource(fileNameModelAnswer, context, "Assignments", fileTypeModelAnswer, inputStream, rpeModelAnswer);   // String name, String site, String tool, String type, InputStream content,  ResourceProperties propertie
+            Reference refAttachementModel = entityManager.newReference(fileModelAnswer.getReference());
+            String attRefId = refAttachementModel.getReference();
+
+            AssignmentModelAnswerItem mAnswer = assignmentSupplementItemService.newModelAnswer();
+            mAnswer.setAssignmentId(aId);
+            assignmentSupplementItemService.saveModelAnswer(mAnswer);
+            mAnswer.setText(modelAnswerText);
+            mAnswer.setShowTo(Integer.parseInt(showTo));
+            // mAnswer.setAttachmentSet
+
+
+            Set<AssignmentSupplementItemAttachment> sAttachments = new HashSet<AssignmentSupplementItemAttachment>();
+            AssignmentSupplementItemAttachment mAttach = assignmentSupplementItemService.newAttachment();
+            mAttach.setAssignmentSupplementItemWithAttachment(mAnswer);
+            mAttach.setAttachmentId(attRefId);
+            assignmentSupplementItemService.saveAttachment(mAttach);
+            sAttachments.add(mAttach);
+
+            assignmentSupplementItemService.saveModelAnswer(mAnswer);
+        }catch (Exception e){
+
+        }
+    }
+
+
+
+    /*
+     *   JJ end custom stuff
+     */
+
+
+
+
+
+
     @EntityCustomAction(action = "annc", viewKey = EntityView.VIEW_LIST)
     public Map<String, Object> getAssignDataForAnnouncement(EntityView view,
                                                             Map<String, Object> params) {
@@ -179,9 +515,9 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
         }
 
         SecurityAdvisor securityAdvisor = createSecurityAdvisor(
-            sessionManager.getCurrentSessionUserId(),
-            SECURE_ADD_ASSIGNMENT,
-            assignmentService.assignmentReference(null, context)
+                sessionManager.getCurrentSessionUserId(),
+                SECURE_ADD_ASSIGNMENT,
+                assignmentService.assignmentReference(null, context)
         );
 
         try {
@@ -227,37 +563,37 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
                         // user's permission
                         if (allowAddAssignment) {
                             assignData.put("assignmentUrl",
-                                            serverConfigurationService
-                                                    .getPortalUrl()
-                                                    + "/directtool/"
-                                                    + fromTool.getId()
-                                                    + "?assignmentId="
-                                                    + AssignmentReferenceReckoner.reckoner().assignment(a).reckon().getReference()
-                                                    + "&panel=Main&sakai_action=doView_assignment");
+                                    serverConfigurationService
+                                            .getPortalUrl()
+                                            + "/directtool/"
+                                            + fromTool.getId()
+                                            + "?assignmentId="
+                                            + AssignmentReferenceReckoner.reckoner().assignment(a).reckon().getReference()
+                                            + "&panel=Main&sakai_action=doView_assignment");
                         } else if (allowSubmitAssignment) {
                             String sakaiAction = "doView_submission";
                             if(a.getHonorPledge()) {
                                 sakaiAction = "doView_assignment_honorPledge";
                             }
                             assignData.put("assignmentUrl",
-                                            serverConfigurationService
-                                                    .getPortalUrl()
-                                                    + "/directtool/"
-                                                    + fromTool.getId()
-                                                    + "?assignmentReference="
-                                                    + AssignmentReferenceReckoner.reckoner().assignment(a).reckon().getReference()
-                                                    + "&panel=Main&sakai_action=" + sakaiAction);
+                                    serverConfigurationService
+                                            .getPortalUrl()
+                                            + "/directtool/"
+                                            + fromTool.getId()
+                                            + "?assignmentReference="
+                                            + AssignmentReferenceReckoner.reckoner().assignment(a).reckon().getReference()
+                                            + "&panel=Main&sakai_action=" + sakaiAction);
                         } else {
                             // user can read the assignment, but not submit, so
                             // render the appropriate url
                             assignData.put("assignmentUrl",
-                                            serverConfigurationService
-                                                    .getPortalUrl()
-                                                    + "/directtool/"
-                                                    + fromTool.getId()
-                                                    + "?assignmentId="
-                                                    + a.getId()
-                                                    + "&panel=Main&sakai_action=doView_assignment_as_student");
+                                    serverConfigurationService
+                                            .getPortalUrl()
+                                            + "/directtool/"
+                                            + fromTool.getId()
+                                            + "?assignmentId="
+                                            + a.getId()
+                                            + "&panel=Main&sakai_action=doView_assignment_as_student");
                         }
                     } catch (IdUnusedException e) {
                         // No site found
@@ -459,7 +795,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
     private Map<String, GraderUser> getGraderUsersForSite(Site site) {
 
         return userDirectoryService.getUsers(site.getUsersIsAllowed(SECURE_ADD_ASSIGNMENT_SUBMISSION))
-            .stream().collect(Collectors.toMap(User::getId, GraderUser::new));
+                .stream().collect(Collectors.toMap(User::getId, GraderUser::new));
     }
 
     @EntityCustomAction(action = "gradable", viewKey = EntityView.VIEW_LIST)
@@ -493,7 +829,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
 
         // A list of mappings of submission id to student id list
         List<SimpleSubmission> submissions
-            = assignment.getSubmissions().stream().map(as -> new SimpleSubmission(as, simpleAssignment)).collect(Collectors.toList());
+                = assignment.getSubmissions().stream().map(as -> new SimpleSubmission(as, simpleAssignment)).collect(Collectors.toList());
 
         List<SimpleGroup> groups = site.getGroups().stream().map(SimpleGroup::new).collect(Collectors.toList());
 
@@ -633,7 +969,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
         }
 
         Set<String> attachmentKeys
-            = params.keySet().stream().filter(k -> k.startsWith("attachment")).collect(Collectors.toSet());
+                = params.keySet().stream().filter(k -> k.startsWith("attachment")).collect(Collectors.toSet());
 
         final List<Reference> attachmentRefs = attachmentKeys.stream().map(k -> {
             FileItem item = (FileItem) params.get(k);
@@ -643,7 +979,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
                 props.addProperty(ResourceProperties.PROP_DISPLAY_NAME, item.getName());
                 props.addProperty(ResourceProperties.PROP_DESCRIPTION, item.getName());
                 ContentResource cr = contentHostingService.addAttachmentResource(item.getName(),
-                    courseId, "Assignments", item.getContentType(), item.getInputStream(), props);
+                        courseId, "Assignments", item.getContentType(), item.getInputStream(), props);
 
                 return entityManager.newReference(cr.getReference());
             } catch (Exception e) {
@@ -810,9 +1146,9 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
             if (assignment.getDateCreated() != null) {
                 props.put("created_time", assignment.getDateCreated().toString());
             }
-			if (assignment.getModifier() != null) {
-				props.put("modified_by", assignment.getModifier());
-			}
+            if (assignment.getModifier() != null) {
+                props.put("modified_by", assignment.getModifier());
+            }
             if (assignment.getDateModified() != null) {
                 props.put("modified_time", assignment.getDateModified().toString());
             }
@@ -833,10 +1169,10 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
             props.put("security.assignment.grade.ref", entity.getReference());
             props.put("url",
                     "/portal/tool/" + placement
-                    + "?assignmentId=" + assignment.getId()
-                    + "&submissionId=" + submissionId
-                    + "&assignmentReference=" + entity.getReference()
-                    + "&panel=Main&sakai_action=" + defaultView);
+                            + "?assignmentId=" + assignment.getId()
+                            + "&submissionId=" + submissionId
+                            + "&assignmentReference=" + entity.getReference()
+                            + "&panel=Main&sakai_action=" + defaultView);
         } catch (IdUnusedException e) {
             throw new EntityNotFoundException("No assignment found", reference, e);
         } catch (PermissionException e) {
@@ -907,7 +1243,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
 
         try {
             List<Group> selectedGroups = siteService.getSite(siteId).getGroups().stream()
-                .filter(g -> groupIds.contains(g.getId())).collect(Collectors.toList());
+                    .filter(g -> groupIds.contains(g.getId())).collect(Collectors.toList());
             return assignmentService.checkAssignmentForUsersInMultipleGroups(siteId, selectedGroups);
         } catch (IdUnusedException e) {
             throw new IllegalArgumentException("Site Id must be provided.");
@@ -1108,6 +1444,12 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
 
         private String maxGradePoint;
 
+        // JJ custom
+        private Boolean isGroup;
+        private Instant visibleTime;
+
+
+
         public SimpleAssignment() {
         }
 
@@ -1118,6 +1460,13 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
             if (a == null) {
                 return;
             }
+
+            //JJ Custom
+            this.isGroup = a.getIsGroup();
+            this.visibleTime = a.getVisibleDate();
+
+
+
             this.id = a.getId();
             this.openTime = a.getOpenDate();
             this.openTimeString = a.getOpenDate().toString();
@@ -1290,7 +1639,7 @@ public class AssignmentEntityProvider extends AbstractEntityProvider implements 
                 this.submittedAttachments = as.getAttachments();
             }
             this.submitters
-                = as.getSubmitters().stream().map(ass -> new SimpleSubmitter(ass, sa.isAnonymousGrading())).collect(Collectors.toList());
+                    = as.getSubmitters().stream().map(ass -> new SimpleSubmitter(ass, sa.isAnonymousGrading())).collect(Collectors.toList());
             this.groupId = as.getGroupId();
             this.userSubmission = as.getUserSubmission();
             this.returned = as.getReturned();

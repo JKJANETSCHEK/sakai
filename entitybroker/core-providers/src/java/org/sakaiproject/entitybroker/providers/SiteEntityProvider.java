@@ -89,6 +89,25 @@ import org.sakaiproject.thread_local.cover.ThreadLocalManager;
 import org.sakaiproject.tool.api.Tool;
 import org.sakaiproject.util.FormattedText;
 
+
+//JJ Custom
+import org.sakaiproject.util.Web;
+import org.sakaiproject.util.Xml;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import java.util.HashSet;
+import org.sakaiproject.content.api.ContentHostingService;
+import org.sakaiproject.entity.api.EntityManager;
+import org.sakaiproject.entity.api.EntityProducer;
+import org.sakaiproject.entity.api.EntityTransferrer;
+import org.sakaiproject.shortenedurl.api.ShortenedUrlService;
+import org.sakaiproject.util.ArrayUtil;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map.Entry;
+
 /**
  * Creates a provider for dealing with sites
  *
@@ -108,6 +127,10 @@ public class SiteEntityProvider extends AbstractEntityProvider implements CoreEn
     private UserEntityProvider userEntityProvider;
     private ServerConfigurationService serverConfigurationService;
     private SecurityService securityService;
+
+    private ContentHostingService contentHostingService;
+    private EntityManager entityManager;
+    private ShortenedUrlService shortenedUrlService;
 
     public static String PREFIX = "site";
 
@@ -545,7 +568,7 @@ public class SiteEntityProvider extends AbstractEntityProvider implements CoreEn
             List<Map<String, Object>> tools = new ArrayList<Map<String, Object>>();
             pageData.put("tools", tools);
 
-            // Peek into the tools to see if they want to be popped up 
+            // Peek into the tools to see if they want to be popped up
             // Similar to PortalSiteHelperImpl.java
             String source = null;
             boolean toolPopup = false;
@@ -654,6 +677,339 @@ public class SiteEntityProvider extends AbstractEntityProvider implements CoreEn
 
         return es;
     }
+
+
+    /*
+     *   JJ custom stuff
+     */
+
+
+
+    @EntityCustomAction(viewKey = "")
+    public String copySite(EntityReference ref, Map<String, Object> params){  //, Object entity, Map<String, Object> params
+        String courseId = (String) params.get("courseId");
+        String title = (String) params.get("title");
+        String newCourseId = (String) params.get("newCourseId");
+
+        Site site = null;
+
+        try {
+            site = siteService.getSite(courseId);
+            Site siteEdit = siteService.addSite(newCourseId, site);
+            siteEdit.setTitle(title);
+            siteService.save(siteEdit);
+
+
+        } catch (IdInvalidException e) {
+            try {
+                siteService.removeSite(site);
+            } catch (Exception e1) {
+                log.warn("Could not cleanup site on create failure: " + e1); // BLANK
+            }
+            throw new IllegalArgumentException("Cannot create site with given id: " + newCourseId
+                    + ":" + e.getMessage(), e);
+        } catch (IdUsedException e) {
+            try {
+                siteService.removeSite(site);
+            } catch (Exception e1) {
+                log.warn("Could not cleanup site on create failure: " + e1); // BLANK
+            }
+            throw new IllegalArgumentException("Cannot create site with given id: " + newCourseId
+                    + ":" + e.getMessage(), e);
+        } catch (PermissionException e) {
+            try {
+                siteService.removeSite(site);
+            } catch (Exception e1) {
+                log.warn("Could not cleanup site on create failure: " + e1); // BLANK
+            }
+            throw new SecurityException(
+                    "Current user does not have permissions to create site: " + ref + ":"
+                            + e.getMessage(), e);
+        } catch (IdUnusedException e) {
+            try {
+                siteService.removeSite(site);
+            } catch (Exception e1) {
+                log.warn("Could not cleanup site on create failure: " + e1); // BLANK
+            }
+            throw new IllegalArgumentException("Cannot save new site with given id: " + newCourseId
+                    + ":" + e.getMessage(), e);
+        }
+        return newCourseId + " wurde erfolgreich erstellt";
+    }
+
+
+    // public void importToolContent(String oSiteId, Site site, Map<String, List<String>> toolOptions, boolean bypassSecurity)  --> possible alternative
+    @EntityCustomAction(viewKey = "")
+    public String copySiteContent(EntityReference ref, Map<String, Object> params) {
+        String destinationsiteid = (String) params.get("toCourseId");
+        String sourcesiteid = (String) params.get("fromCourseId");
+
+        Site site = null;
+        List<SitePage> pages = null;
+        try {
+            site = siteService.getSite(destinationsiteid);
+            pages = site.getPages();
+        }catch (Exception e){
+            //TODO
+        }
+        Set<String> toolIds = new HashSet();
+
+        for (SitePage page : pages) {
+
+            //get tools in page
+            List<ToolConfiguration> tools = page.getTools();
+            boolean includePage = true;
+            for (ToolConfiguration toolConfig : tools) {
+                //if we not a superAdmin, check the page properties
+                //if any tool on this page is hidden, skip the rest of the tools and exclude this page from the output
+                //this makes the behaviour consistent with the portal
+                //if not superUser, process  tool function requirements
+
+                toolIds.add(toolConfig.getToolId());
+            }
+        }
+
+        for (String toolId : toolIds)
+        {
+            Map<String,String> entityMap;
+            Map transversalMap = new HashMap();
+
+            if (!toolId.equalsIgnoreCase("sakai.resources"))
+            {
+                entityMap = transferCopyEntities(toolId, sourcesiteid, destinationsiteid);
+            }
+            else
+            {
+                entityMap = transferCopyEntities(toolId, contentHostingService.getSiteCollection(sourcesiteid), contentHostingService.getSiteCollection(destinationsiteid));
+            }
+
+            if(entityMap != null)
+            {
+                transversalMap.putAll(entityMap);
+            }
+
+            updateEntityReferences(toolId, destinationsiteid, transversalMap, site);
+        }
+
+        return "success";
+
+    }
+
+
+    protected Map transferCopyEntities(String toolId, String fromContext, String toContext) {
+
+        Map transversalMap = new HashMap();
+
+        // offer to all EntityProducers
+        for (EntityProducer ep : entityManager.getEntityProducers()) {
+            if (ep instanceof EntityTransferrer) {
+                try {
+                    EntityTransferrer et = (EntityTransferrer) ep;
+
+                    // if this producer claims this tool id
+                    if (ArrayUtil.contains(et.myToolIds(), toolId)) {
+                        Map<String,String> entityMap = et.transferCopyEntities(fromContext, toContext, new ArrayList<String>(), null, true);
+                        if (entityMap != null) {
+                            transversalMap.putAll(entityMap);
+                        }
+                    }
+                } catch (Throwable t) {
+                    log.warn("Error encountered while asking EntityTransfer to transferCopyEntities from: " + fromContext + " to: " + toContext, t);
+                }
+            }
+        }
+
+        // record direct URL for this tool in old and new sites, so anyone using the URL in HTML text will
+        // get a proper update for the HTML in the new site
+        // Some tools can have more than one instance. Because getTools should always return tools
+        // in order, we can assume that if there's more than one instance of a tool, the instances
+        // correspond
+
+        Site fromSite = null;
+        Site toSite = null;
+        Collection<ToolConfiguration> fromTools = null;
+        Collection<ToolConfiguration> toTools = null;
+        try
+        {
+            fromSite = siteService.getSite(fromContext);
+            toSite = siteService.getSite(toContext);
+            fromTools = fromSite.getTools(toolId);
+            toTools = toSite.getTools(toolId);
+        }
+        catch (Exception e)
+        {
+            log.warn("transferCopyEntities: can't get site:" + e.getMessage());
+        }
+
+        // getTools appears to return tools in order. So we should be able to match them
+        if (fromTools != null && toTools != null)
+        {
+            Iterator<ToolConfiguration> toToolIt = toTools.iterator();
+            for (ToolConfiguration fromTool: fromTools)
+            {
+                if (toToolIt.hasNext())
+                {
+                    ToolConfiguration toTool = toToolIt.next();
+                    String fromUrl = serverConfigurationService.getPortalUrl() + "/directtool/" + Web.escapeUrl(fromTool.getId()) + "/";
+                    String toUrl = serverConfigurationService.getPortalUrl() + "/directtool/" + Web.escapeUrl(toTool.getId()) + "/";
+                    if (transversalMap.get(fromUrl) == null)
+                    {
+                        transversalMap.put(fromUrl, toUrl);
+                    }
+                    if (shortenedUrlService.shouldCopy(fromUrl))
+                    {
+                        fromUrl = shortenedUrlService.shorten(fromUrl, false);
+                        toUrl = shortenedUrlService.shorten(toUrl, false);
+                        if (fromUrl != null && toUrl != null)
+                        {
+                            transversalMap.put(fromUrl, toUrl);
+                        }
+                    }
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        return transversalMap;
+    }
+
+
+    protected void updateEntityReferences(String toolId, String toContext, Map transversalMap, Site newSite)
+    {
+        if (toolId.equalsIgnoreCase("sakai.iframe.site"))
+        {
+            updateSiteInfoToolEntityReferences(transversalMap, newSite);
+        }
+        else
+        {
+            for (Iterator i = entityManager.getEntityProducers().iterator(); i.hasNext();)
+            {
+                EntityProducer ep = (EntityProducer) i.next();
+                if (ep instanceof EntityTransferrer)
+                {
+                    try
+                    {
+                        EntityTransferrer et = (EntityTransferrer) ep;
+
+                        // if this producer claims this tool id
+                        if (ArrayUtil.contains(et.myToolIds(), toolId))
+                        {
+                            et.updateEntityReferences(toContext, transversalMap);
+                        }
+                    }
+                    catch (Throwable t)
+                    {
+                        log.error("Error encountered while asking EntityTransfer to updateEntityReferences at site: " + toContext, t);
+                    }
+                }
+            }
+        }
+    }
+
+
+    private void updateSiteInfoToolEntityReferences(Map transversalMap, Site newSite)
+    {
+        if(transversalMap != null && transversalMap.size() > 0 && newSite != null)
+        {
+            Set<Entry<String, String>> entrySet = (Set<Entry<String, String>>) transversalMap.entrySet();
+
+            String msgBody = newSite.getDescription();
+            if(msgBody != null && !"".equals(msgBody))
+            {
+                boolean updated = false;
+                Iterator<Entry<String, String>> entryItr = entrySet.iterator();
+                while(entryItr.hasNext())
+                {
+                    Entry<String, String> entry = (Entry<String, String>) entryItr.next();
+                    String fromContextRef = entry.getKey();
+                    if(msgBody.contains(fromContextRef))
+                    {
+                        msgBody = msgBody.replace(fromContextRef, entry.getValue());
+                        updated = true;
+                    }
+                }
+                if(updated)
+                {
+                    //update the site b/c some tools (Lessonbuilder) updates the site structure (add/remove pages) and we don't want to
+                    //over write this
+                    try
+                    {
+                        newSite = siteService.getSite(newSite.getId());
+                        newSite.setDescription(msgBody);
+                        siteService.save(newSite);
+                    }
+                    catch (IdUnusedException e) {
+                        // TODO:
+                    }
+                    catch (PermissionException p)
+                    {
+                        // TODO:
+                    }
+                }
+            }
+        }
+    }
+
+
+
+
+
+
+    @EntityCustomAction(viewKey = "")
+    public String getSubSites(EntityReference ref, Map<String, Object> params){
+
+        String siteid = (String) params.get("siteid");
+
+
+        try {
+            List<Site> subSites = siteService.getSubSites(siteid);
+            String xml = getSiteListXml(subSites);
+            return xml;
+        } catch (Exception e) {
+            return "<exception/>";
+        }
+    }
+
+    private String getSiteListXml(List<Site> sites) {
+        Document dom = Xml.createDocument();
+        Node list = dom.createElement("list");
+        dom.appendChild(list);
+
+        for (Site site: sites) {
+            Node item = dom.createElement("item");
+            Node siteId = dom.createElement("siteId");
+            siteId.appendChild(dom.createTextNode(site.getId()));
+            Node siteTitle = dom.createElement("siteTitle");
+            siteTitle.appendChild(dom.createTextNode(site.getTitle()));
+
+            item.appendChild(siteId);
+            item.appendChild(siteTitle);
+            list.appendChild(item);
+        }
+
+        return Xml.writeDocumentToString(dom);
+    }
+
+
+
+    /*
+     *   end JJ Custom stuff
+     */
+
+
+
+
+
+
+
+
+
+
+
+
 
     /**
      * @param site
