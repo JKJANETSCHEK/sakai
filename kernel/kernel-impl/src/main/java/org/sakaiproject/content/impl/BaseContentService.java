@@ -8301,10 +8301,14 @@ SiteContentAdvisorProvider, SiteContentAdvisorTypeRegistry, HardDeleteAware
 					Entity oResource = (Entity) oResources.get(i);
 					String oId = oResource.getId();
 
+
+					//  JJ ->  moved from inside if to outside!!!
+					// only import those with ids inside the list
+					toBeImported = false;
+
 					if (resourceIds != null && resourceIds.size() > 0)
 					{
-						// only import those with ids inside the list
-						toBeImported = false;
+
 						for (int j = 0; j < resourceIds.size() && !toBeImported; j++)
 						{
 							if (((String) resourceIds.get(j)).equals(oId))
